@@ -1,203 +1,356 @@
 """
 Smart Washroom Hygiene Monitoring System
-Streamlit Admin Dashboard (Realtime DB Fixed Version)
+Streamlit Admin Dashboard
 """
 
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, firestore
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+import plotly.express as px
+from datetime import datetime, timedelta
 import time
 import os
 
-# ==================== PAGE CONFIG ====================
+# ==================== PAGE CONFIGURATION ====================
 st.set_page_config(
     page_title="Washroom Hygiene Dashboard",
     page_icon="🚻",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ==================== CUSTOM CSS ====================
 st.markdown("""
 <style>
-.main-header {
-    font-size: 3rem;
-    font-weight: bold;
-    text-align: center;
-    color: #4F46E5;
-}
-.good {color: #10B981; font-size: 2rem; font-weight: bold;}
-.medium {color: #F59E0B; font-size: 2rem; font-weight: bold;}
-.bad {color: #EF4444; font-size: 2rem; font-weight: bold;}
+    .main-header {
+        font-size: 3rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+    }
+    .good-score {
+        color: #10b981;
+        font-weight: bold;
+        font-size: 2rem;
+    }
+    .fair-score {
+        color: #f59e0b;
+        font-weight: bold;
+        font-size: 2rem;
+    }
+    .poor-score {
+        color: #ef4444;
+        font-weight: bold;
+        font-size: 2rem;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== FIREBASE INIT ====================
+# ==================== FIREBASE INITIALIZATION ====================
 @st.cache_resource
-def init_firebase():
+def initialize_firebase():
     try:
         firebase_admin.get_app()
     except ValueError:
-        # 🔥 USE SECRETS (Streamlit Cloud) OR LOCAL FILE
         if "firebase" in st.secrets:
-            cred = credentials.Certificate(dict(st.secrets["firebase"]))
+            # Use Streamlit secrets for deployment
+            secrets_dict = dict(st.secrets["firebase"])
+            if "private_key" in secrets_dict:
+                secrets_dict["private_key"] = secrets_dict["private_key"].replace("\\n", "\n")
+            cred = credentials.Certificate(secrets_dict)
         else:
-            cred = credentials.Certificate("serviceAccountKey.json")
-
+            # Fallback to local file
+            key_path = "serviceAccountKey.json"
+            
+            if not os.path.exists(key_path):
+                st.error("❌ Firebase configuration not found in st.secrets or serviceAccountKey.json")
+                st.info("💡 For Streamlit Cloud deployment: add your Firebase JSON details in the Secrets tab under a [firebase] section formatted as TOML.")
+                st.stop()
+            
+            cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred, {
-            # ✅ IMPORTANT: replace if needed
-            "databaseURL": "https://smart-washroom-hygiene-s-4af6a-default-rtdb.asia-southeast1.firebasedatabase.app"
+            'databaseURL': 'https://smart-washroom-hygiene-s-4af6a-default-rtdb.firebaseio.com/'
         })
+    
+    return db.reference(), firestore.client()
 
-    return db.reference()
+realtime_db, firestore_db = initialize_firebase()
 
-db_ref = init_firebase()
-
-# ==================== DATA FUNCTIONS ====================
-@st.cache_data(ttl=5)
-def fetch_all_data():
+# ==================== DATA FETCHING FUNCTIONS ====================
+@st.cache_data(ttl=10)
+def get_washroom_list():
     try:
-        data = db_ref.get()
+        washrooms_ref = realtime_db.child('washrooms')
+        washrooms = washrooms_ref.get()
+        
+        if washrooms:
+            return list(washrooms.keys())
+        return []
+    except Exception as e:
+        st.error(f"Error fetching washrooms: {e}")
+        return []
+
+@st.cache_data(ttl=5)
+def get_current_status(washroom_id):
+    try:
+        current_ref = realtime_db.child(f'washrooms/{washroom_id}/current')
+        data = current_ref.get()
         return data if data else {}
     except Exception as e:
-        st.error(f"Firebase Error: {e}")
+        st.error(f"Error fetching status: {e}")
         return {}
 
-def get_washrooms(data):
-    return list(data.keys())
+# ==================== AI PREDICTION FUNCTION ====================
+def predict_hygiene_drop(current_score, footfall):
+    decay_factor = 0.05
+    predicted_score = current_score - (footfall * decay_factor)
+    return max(predicted_score, 0)
 
-def get_current(data, washroom):
-    wr = data.get(washroom, {})
-    return wr.get("current", wr)
-
-# ==================== SCORE LOGIC ====================
-def score_class(score):
+def get_score_color(score):
     if score >= 70:
-        return "good"
+        return "green"
     elif score >= 50:
-        return "medium"
-    return "bad"
+        return "orange"
+    return "red"
 
-def predict_score(score, footfall):
-    return max(score - (footfall * 0.05), 0)
+def get_score_class(score):
+    if score >= 70:
+        return "good-score"
+    elif score >= 50:
+        return "fair-score"
+    return "poor-score"
 
-# ==================== MAIN ====================
+# ==================== MAIN DASHBOARD ====================
 def main():
-
-    st.markdown('<div class="main-header">🚻 Smart Washroom Dashboard</div>', unsafe_allow_html=True)
-
-    data = fetch_all_data()
-
-    if not data:
-        st.warning("⚠️ No data found in Firebase")
-        st.stop()
-
-    washrooms = get_washrooms(data)
-
-    # ================= SIDEBAR =================
+    
+    st.markdown('<h1 class="main-header">🚻 Smart Washroom Hygiene Dashboard</h1>', unsafe_allow_html=True)
+    
+    # ==================== SIDEBAR ====================
     with st.sidebar:
-        st.title("⚙️ Controls")
-
-        selected = st.selectbox("Select Washroom", washrooms)
-
-        auto_refresh = st.checkbox("Auto Refresh", True)
-
-        if st.button("🔄 Refresh"):
+        st.image("https://img.icons8.com/clouds/200/000000/toilet.png", width=150)
+        st.title("Control Panel")
+        
+        if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
+        
+        st.divider()
+        
+        washroom_list = get_washroom_list()
+        
+        if not washroom_list:
+            st.warning("No washrooms found in database")
+            st.stop()
+        
+        selected_washroom = st.selectbox(
+            "Select Washroom",
+            washroom_list,
+            index=0
+        )
+        
+        st.divider()
+        
+        time_range = st.selectbox(
+            "Historical Data Range",
+            ["Last 6 Hours", "Last 12 Hours", "Last 24 Hours", "Last 7 Days"],
+            index=2
+        )
+        
+        hours_map = {
+            "Last 6 Hours": 6,
+            "Last 12 Hours": 12,
+            "Last 24 Hours": 24,
+            "Last 7 Days": 168
+        }
+        hours = hours_map[time_range]
+        
+        st.divider()
+        
+        auto_refresh = st.checkbox("Auto-refresh (10s)", value=True)
+        
+        st.divider()
+        
+        threshold = st.slider("Alert Threshold", 0, 100, 50)
+    
+    # ==================== CURRENT STATUS ====================
+    st.header(f"📊 Current Status: {selected_washroom}")
+    
+    current_data = get_current_status(selected_washroom)
+    
+    if current_data:
+        score = current_data.get('score', 0)
+        component_scores = current_data.get('component_scores', {})
+        anomalies = current_data.get('anomalies', [])
+        timestamp = current_data.get('timestamp', 'N/A')
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            score_class = get_score_class(score)
+            st.markdown(f"### Hygiene Score")
+            st.markdown(f'<div class="{score_class}">{score:.1f}%</div>', unsafe_allow_html=True)
+            
+            if score >= 70:
+                st.success("✅ Good")
+            elif score >= 50:
+                st.warning("⚠️ Fair")
+            else:
+                st.error("❌ Needs Cleaning")
+        
+        with col2:
+            st.metric("Air Quality", f"{component_scores.get('air_quality', 0):.1f}%")
+        
+        with col3:
+            st.metric("Floor Moisture", f"{component_scores.get('floor_moisture', 0):.1f}%")
+        
+        with col4:
+            st.metric("Humidity", f"{component_scores.get('humidity', 0):.1f}%")
+        
+        col5, col6, col7 = st.columns(3)
+        
+        with col5:
+            st.metric("Temperature", f"{component_scores.get('temperature', 0):.1f}%")
+        
+        with col6:
+            st.metric("Active Anomalies", len(anomalies))
+        
+        with col7:
+            st.info(f"🕐 Updated: {timestamp}")
+        
+        # ==================== AI PREDICTION ====================
+        st.subheader("🤖 AI Prediction")
 
-    # ================= CURRENT =================
-    st.header(f"📍 {selected}")
+        footfall = current_data.get('sensor_data', {}).get('footfall_count', 0)
+        predicted_score = predict_hygiene_drop(score, footfall)
 
-    current = get_current(data, selected)
+        colp1, colp2 = st.columns(2)
 
-    if not current:
-        st.error("No current data available")
-        return
+        with colp1:
+            st.metric("Predicted Score (Next Cycle)", f"{predicted_score:.1f}%")
 
-    score = current.get("score", 0)
-    comp = current.get("component_scores", {})
-    anomalies = current.get("anomalies", [])
-    footfall = current.get("sensor_data", {}).get("footfall_count", 0)
+        with colp2:
+            if predicted_score < threshold:
+                st.error("⚠️ Cleaning Required Soon")
+            else:
+                st.success("✅ No Immediate Action Needed")
 
-    col1, col2, col3, col4 = st.columns(4)
+        if predicted_score < 50:
+            st.error("🚨 Immediate Cleaning Required!")
+        elif predicted_score < 70:
+            st.warning("🧹 Schedule Cleaning Soon")
+        else:
+            st.success("🟢 Washroom is Stable")
 
-    with col1:
-        st.write("### Hygiene Score")
-        st.markdown(f"<div class='{score_class(score)}'>{score:.1f}%</div>", unsafe_allow_html=True)
-
-    with col2:
-        st.metric("Air", comp.get("air_quality", 0))
-
-    with col3:
-        st.metric("Floor", comp.get("floor_moisture", 0))
-
-    with col4:
-        st.metric("Humidity", comp.get("humidity", 0))
-
-    # ================= PREDICTION =================
-    st.subheader("🤖 Prediction")
-
-    predicted = predict_score(score, footfall)
-
-    st.metric("Next Score", f"{predicted:.1f}%")
-
-    if predicted < 50:
-        st.error("🚨 Cleaning Required")
-    elif predicted < 70:
-        st.warning("⚠️ Schedule Cleaning")
+        # ==================== ANOMALIES ====================
+        if anomalies:
+            st.subheader("⚠️ Active Anomalies")
+            for anomaly in anomalies:
+                severity = anomaly.get('severity', 'MEDIUM')
+                message = anomaly.get('message', 'Unknown anomaly')
+                
+                if severity == 'HIGH':
+                    st.error(f"🔴 {message}")
+                elif severity == 'MEDIUM':
+                    st.warning(f"🟡 {message}")
+                else:
+                    st.info(f"🔵 {message}")
+        
+        # ==================== COMPONENT CHART ====================
+        st.subheader("📈 Component Breakdown")
+        
+        fig_components = go.Figure()
+        
+        components = ['Air Quality', 'Floor Moisture', 'Humidity', 'Temperature']
+        values = [
+            component_scores.get('air_quality', 0),
+            component_scores.get('floor_moisture', 0),
+            component_scores.get('humidity', 0),
+            component_scores.get('temperature', 0)
+        ]
+        colors = [get_score_color(v) for v in values]
+        
+        fig_components.add_trace(go.Bar(
+            x=components,
+            y=values,
+            marker_color=colors,
+            text=[f"{v:.1f}%" for v in values],
+            textposition='outside'
+        ))
+        
+        fig_components.update_layout(
+            title="Component Scores",
+            yaxis_title="Score (%)",
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_components, use_container_width=True)
+        
     else:
-        st.success("✅ Stable")
-
-    # ================= ANOMALIES =================
-    if anomalies:
-        st.subheader("⚠️ Alerts")
-        for a in anomalies:
-            st.error(a.get("message", "Unknown"))
-
-    # ================= CHART =================
-    st.subheader("📊 Components")
-
-    fig = go.Figure()
-
-    names = ["Air", "Floor", "Humidity", "Temp"]
-    vals = [
-        comp.get("air_quality", 0),
-        comp.get("floor_moisture", 0),
-        comp.get("humidity", 0),
-        comp.get("temperature", 0),
-    ]
-
-    fig.add_bar(x=names, y=vals, text=vals, textposition="outside")
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ================= OVERVIEW =================
-    st.header("🏢 All Washrooms")
-
-    rows = []
-
-    for w in washrooms:
-        c = get_current(data, w)
-        rows.append({
-            "Washroom": w,
-            "Score": c.get("score", 0),
-            "Anomalies": len(c.get("anomalies", []))
-        })
-
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True)
-
-    st.metric("Average Score", f"{df['Score'].mean():.1f}%")
-
-    # ================= AUTO REFRESH =================
+        st.warning("No current data available for this washroom")
+    
+    # ==================== MULTI-WASHROOM OVERVIEW ====================
+    st.header("🏢 All Washrooms Overview")
+    
+    washroom_overview = []
+    
+    for wr_id in washroom_list:
+        data = get_current_status(wr_id)
+        if data:
+            washroom_overview.append({
+                'Washroom': wr_id,
+                'Score': data.get('score', 0),
+                'Status': '✅ Good' if data.get('score', 0) >= 70 else 
+                         '⚠️ Fair' if data.get('score', 0) >= 50 else '❌ Poor',
+                'Anomalies': len(data.get('anomalies', []))
+            })
+    
+    if washroom_overview:
+        df_overview = pd.DataFrame(washroom_overview)
+        
+        def highlight_score(val):
+            if val >= 70:
+                return 'background-color: #d1fae5'
+            elif val >= 50:
+                return 'background-color: #fef3c7'
+            return 'background-color: #fee2e2'
+        
+        styled_df = df_overview.style.applymap(highlight_score, subset=['Score'])
+        
+        st.dataframe(styled_df, use_container_width=True)
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            avg_score = df_overview['Score'].mean()
+            st.metric("Average Score", f"{avg_score:.1f}%")
+        
+        with col2:
+            good_count = (df_overview['Score'] >= 70).sum()
+            st.metric("Good Washrooms", f"{good_count}/{len(df_overview)}")
+        
+        with col3:
+            total_anomalies = df_overview['Anomalies'].sum()
+            st.metric("Total Anomalies", total_anomalies)
+    
+    # ==================== AUTO-REFRESH ====================
     if auto_refresh:
         time.sleep(10)
         st.rerun()
 
-
-# ==================== RUN ====================
+# ==================== RUN APP ====================
 if __name__ == "__main__":
     main()
