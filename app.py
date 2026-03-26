@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 import time
-import os
 
 # ==================== PAGE CONFIGURATION ====================
 st.set_page_config(
@@ -65,16 +64,12 @@ def initialize_firebase():
     try:
         firebase_admin.get_app()
     except ValueError:
+        # ✅ ONLY Streamlit Secrets (DEPLOYMENT SAFE)
         firebase_config = dict(st.secrets["firebase"])
-        key_path = "firebase_config"
-        
-        if not os.path.exists(key_path):
-            st.error(f"❌ Firebase key not found at: {key_path}")
-            st.stop()
-        
-        cred = credentials.Certificate(key_path)
+        cred = credentials.Certificate(firebase_config)
+
         firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://smart-washroom-hygiene-s-4af6a-default-rtdb.firebaseio.com/'
+            'databaseURL': 'https://your-project-id-default-rtdb.firebaseio.com/'
         })
     
     return db.reference(), firestore.client()
