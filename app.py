@@ -3,6 +3,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 import pandas as pd
 import plotly.express as px
+import time
 
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(
@@ -12,100 +13,138 @@ st.set_page_config(
 )
 
 # ------------------ FIREBASE INIT ------------------
-if not firebase_admin._apps:
-    cred = credentials.Certificate(dict(st.secrets["firebase"]))
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': st.secrets["firebase"]["databaseURL"]
-    })
+@st.cache_resource
+def init_firebase():
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(st.secrets["firebase"]))
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': st.secrets["firebase"]["databaseURL"]
+        })
+    return True
+
+init_firebase()
 
 # ------------------ FETCH DATA ------------------
+@st.cache_data(ttl=5)  # refresh every 5 sec
 def fetch_data():
-    ref = db.reference("/")
-    data = ref.get()
+    try:
+        ref = db.reference("/")
+        data = ref.get()
 
-    main_data = []
-    
-    for key, value in data.items():
-        if key != "cleaning_history":
-            for entry_id, entry in value.items():
-                main_data.append(entry)
+        if not data:
+            return pd.DataFrame()
 
-    return pd.DataFrame(main_data)
+        records = []
 
+        for key, value in data.items():
+
+            # Skip cleaning history
+            if key == "cleaning_history":
+                continue
+
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if isinstance(v, dict):
+                        records.append(v)
+
+        return pd.DataFrame(records)
+
+    except Exception as e:
+        st.error(f"Firebase Error: {e}")
+        return pd.DataFrame()
+
+# ------------------ FETCH CLEANING ------------------
+@st.cache_data(ttl=10)
 def fetch_cleaning():
-    ref = db.reference("/cleaning_history")
-    data = ref.get()
-    if data:
-        return pd.DataFrame(data.values())
-    return pd.DataFrame()
+    try:
+        ref = db.reference("/cleaning_history")
+        data = ref.get()
 
+        if data:
+            return pd.DataFrame(data.values())
+        return pd.DataFrame()
+
+    except:
+        return pd.DataFrame()
+
+# ------------------ AUTO REFRESH ------------------
+refresh = st.sidebar.slider("🔄 Refresh Rate (sec)", 5, 30, 5)
+time.sleep(refresh)
+
+# ------------------ LOAD DATA ------------------
 df = fetch_data()
 clean_df = fetch_cleaning()
 
 # ------------------ HEADER ------------------
-st.title("🚻 Smart Washroom Hygiene Monitoring System")
-st.markdown("Real-time IoT-based cleanliness tracking")
+st.title("🚻 Smart Washroom Hygiene Monitoring")
+st.caption("Realtime IoT Dashboard using Firebase")
 
 # ------------------ METRICS ------------------
 if not df.empty:
 
     avg_score = round(df["score"].mean(), 2)
-    total_usage = df["presence"].sum()
-    busy_count = (df["status"] == "BUSY").sum()
+    usage = int(df["presence"].sum())
+    busy = int((df["status"] == "BUSY").sum())
 
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    col1.metric("🧼 Avg Hygiene Score", avg_score)
-    col2.metric("🚽 Total Usage", int(total_usage))
-    col3.metric("🚻 Busy Count", int(busy_count))
+    c1.metric("🧼 Avg Score", avg_score)
+    c2.metric("🚽 Usage", usage)
+    c3.metric("🚻 Busy", busy)
 
 # ------------------ ALERTS ------------------
-st.subheader("🚨 Low Hygiene Alerts")
+st.subheader("🚨 Alerts")
 
-alerts = df[df["score"] < 50]
+if not df.empty:
+    alerts = df[df["score"] < 50]
 
-if not alerts.empty:
-    st.error(f"{len(alerts)} Low hygiene events detected!")
-    st.dataframe(alerts[["washroom_id", "score", "timestamp"]])
-else:
-    st.success("✅ All washrooms are clean")
+    if len(alerts) > 0:
+        st.error(f"{len(alerts)} washrooms need cleaning!")
+        st.dataframe(alerts[["washroom_id", "score", "status"]])
+    else:
+        st.success("All washrooms are clean ✅")
 
-# ------------------ SCORE TREND ------------------
+# ------------------ TREND ------------------
 st.subheader("📊 Hygiene Score Trend")
 
-df["timestamp"] = pd.to_numeric(df["timestamp"], errors='coerce')
+if not df.empty:
+    df["timestamp"] = pd.to_numeric(df["timestamp"], errors='coerce')
 
-fig = px.line(df, x="timestamp", y="score", color="washroom_id")
-st.plotly_chart(fig, use_container_width=True)
+    fig = px.line(df, x="timestamp", y="score", color="washroom_id")
+    st.plotly_chart(fig, use_container_width=True)
 
-# ------------------ SENSOR ANALYTICS ------------------
-st.subheader("🌡️ Sensor Analytics")
+# ------------------ SENSOR ------------------
+st.subheader("🌡 Sensor Data")
 
-sensor_df = pd.json_normalize(df["component_scores"])
+if "component_scores" in df:
+    sensor_df = pd.json_normalize(df["component_scores"])
 
-fig2 = px.line(sensor_df, title="Sensor Readings")
-st.plotly_chart(fig2, use_container_width=True)
+    fig2 = px.line(sensor_df)
+    st.plotly_chart(fig2, use_container_width=True)
 
-# ------------------ STATUS PIE ------------------
-st.subheader("🚻 Washroom Status Distribution")
+# ------------------ STATUS ------------------
+st.subheader("🚻 Status Distribution")
 
-status_fig = px.pie(df, names="status")
-st.plotly_chart(status_fig, use_container_width=True)
+if not df.empty:
+    fig3 = px.pie(df, names="status")
+    st.plotly_chart(fig3, use_container_width=True)
 
-# ------------------ CLEANING HISTORY ------------------
+# ------------------ CLEANING ------------------
 st.subheader("🧹 Cleaning History")
 
 if not clean_df.empty:
     st.dataframe(clean_df)
 else:
-    st.info("No cleaning data available")
+    st.info("No cleaning data")
 
 # ------------------ DOWNLOAD ------------------
-st.subheader("📥 Download Data")
-
-csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("Download CSV", csv, "washroom_data.csv", "text/csv")
+if not df.empty:
+    st.download_button(
+        "📥 Download CSV",
+        df.to_csv(index=False),
+        "washroom_data.csv"
+    )
 
 # ------------------ FOOTER ------------------
 st.markdown("---")
-st.caption("Smart Washroom System | Firebase + Streamlit")
+st.caption("Smart Washroom System 🚀 | Firebase Realtime DB Connected")
