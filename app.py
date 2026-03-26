@@ -62,8 +62,13 @@ st.markdown("""
 # ==================== FIREBASE INITIALIZATION ====================
 @st.cache_resource
 def initialize_firebase():
+    target_db_url = 'https://smart-washroom-hygiene-s-4af6a-default-rtdb.firebaseio.com/'
     try:
-        firebase_admin.get_app()
+        app = firebase_admin.get_app()
+        # If the app was initialized with a different or missing DB URL, delete it and re-initialize
+        if app.options.get('databaseURL') != target_db_url:
+            firebase_admin.delete_app(app)
+            raise ValueError("Force reinitialization")
     except ValueError:
         if "firebase" in st.secrets:
             # Use Streamlit secrets for deployment
@@ -82,12 +87,16 @@ def initialize_firebase():
             
             cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://smart-washroom-hygiene-s-4af6a-default-rtdb.firebaseio.com/'
+            'databaseURL': target_db_url
         })
     
-    return db.reference(), firestore.client()
+    return db.reference()
 
-realtime_db, firestore_db = initialize_firebase()
+try:
+    realtime_db = initialize_firebase()
+except Exception as init_err:
+    st.error(f"Failed to initialize Firebase: {init_err}")
+    st.stop()
 
 # ==================== DATA FETCHING FUNCTIONS ====================
 @st.cache_data(ttl=10)
@@ -100,7 +109,10 @@ def get_washroom_list():
             return list(washrooms.keys())
         return []
     except Exception as e:
+        import traceback
         st.error(f"Error fetching washrooms: {e}")
+        with st.expander("Show detailed error"):
+            st.code(traceback.format_exc())
         return []
 
 @st.cache_data(ttl=5)
