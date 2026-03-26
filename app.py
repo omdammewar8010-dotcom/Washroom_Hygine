@@ -65,7 +65,7 @@ def initialize_firebase():
     try:
         firebase_admin.get_app()
     except ValueError:
-        key_path = "serviceAccountKey.json"
+        key_path = "firebase_config"
         
         if not os.path.exists(key_path):
             st.error(f"❌ Firebase key not found at: {key_path}")
