@@ -69,7 +69,7 @@ def initialize_firebase():
         cred = credentials.Certificate(firebase_config)
 
         firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://your-project-id-default-rtdb.firebaseio.com/'
+            'databaseURL': 'https://smart-washroom-hygiene-s-4af6a-default-rtdb.firebaseio.com/'
         })
     
     return db.reference(), firestore.client()
